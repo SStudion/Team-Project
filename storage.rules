@@ -1,0 +1,71 @@
+rules_version = '2';
+
+// Firebase Storage Security Rules — UAAMS
+//
+// Files live at:  applications/{universityId}/{studentId}/{applicationId}/{fileName}
+//
+// I put universityId and studentId INTO the path on purpose: it means ownership and
+// university scoping can be checked straight off the path segments, with only one
+// Firestore lookup needed (the admin's role/university), instead of fetching the
+// document metadata on every file access.
+//
+// Note: in dummy mode (NEXT_PUBLIC_STORAGE_MODE=dummy) nothing touches Storage at
+// all — dummy documents are metadata-only records in Firestore. These rules only
+// matter once real uploads are switched on, but they're written and committed now
+// so enabling Storage is a flip of the flag, not a scramble.
+
+service firebase.storage {
+  match /b/{bucket}/o {
+
+    match /applications/{universityId}/{studentId}/{applicationId}/{fileName} {
+
+      // Reads: the student who owns the file, or an admin assigned to the
+      // university in the path. The firestore.get() is what ties Storage access
+      // to the same users/{uid} role model the Firestore rules use — one source
+      // of truth for who is an admin and where.
+      allow read: if request.auth != null && (
+        request.auth.uid == studentId
+        || (
+          firestore.get(/databases/(default)/documents/users/$(request.auth.uid)).data.role == "university_admin"
+          && firestore.get(/databases/(default)/documents/users/$(request.auth.uid)).data.assignedUniversityId == universityId
+        )
+      );
+
+      // Uploads: owner only, and the file has to pass the same validation the PRD
+      // asks for in the UI — max 5MB, and only the four accepted formats. Checking
+      // it here as well means a crafted request can't bypass the form validation.
+      // The firestore.get() on the application enforces "editable while draft only"
+      // at the rule level too — a client talking to Storage directly (skipping our
+      // app entirely) still can't attach files to a submitted or decided application.
+      // The two extra get() comparisons pin the path to reality: the application in
+      // the path must belong to the uploader, and the universityId segment must match
+      // the application's actual university — otherwise a crafted path could park a
+      // file under the wrong university and grant the wrong admins read access.
+      // (Rules cache repeated get()s of the same doc, so this is still one read.)
+      allow create: if request.auth != null
+        && request.auth.uid == studentId
+        && firestore.get(/databases/(default)/documents/applications/$(applicationId)).data.status == "draft"
+        && firestore.get(/databases/(default)/documents/applications/$(applicationId)).data.studentId == request.auth.uid
+        && firestore.get(/databases/(default)/documents/applications/$(applicationId)).data.universityId == universityId
+        && request.resource.size <= 5 * 1024 * 1024
+        && request.resource.contentType in [
+             "application/pdf", "image/jpeg", "image/png"
+           ];
+
+      // No overwriting in place — replacing a document means delete + re-upload,
+      // which keeps the Firestore metadata record honest about what the file is.
+      allow update: if false;
+
+      // Owner can remove their own file, and only while the application is still a
+      // draft — enforced right here with the same firestore.get() pattern as create,
+      // so evidence attached to a submitted or decided application can't be pulled
+      // out from under the admin by going to Storage directly.
+      allow delete: if request.auth != null
+        && request.auth.uid == studentId
+        && firestore.get(/databases/(default)/documents/applications/$(applicationId)).data.status == "draft";
+    }
+
+    // Anything outside applications/ has no rules, so it's denied by default —
+    // there is deliberately nowhere else to put files in this project.
+  }
+}

@@ -8,7 +8,7 @@ This folder holds the project's working documentation. It is kept in the reposit
 |---|---|---|
 | `backend-worklog.md` | Dated log of backend work, session by session | Kristina |
 | `architecture-and-structure.md` | Proposed repository structure and how the backend fits together (Firebase-as-a-Service) | Kristina |
-| `data-contract.md` | The agreed Firestore data structure — the source of truth both frontend and backend build to *(to be added once agreed)* | Kristina |
+| `data-contract.md` | The agreed Firestore data structure — the source of truth both frontend and backend build to | Kristina |
 | `setup-evidence/` | Screenshots evidencing the Firebase setup (project, auth, Firestore region, storage) | Kristina |
 | `test-plan.md` | Test plan and test cases *(to be added)* | Patryk |
 
