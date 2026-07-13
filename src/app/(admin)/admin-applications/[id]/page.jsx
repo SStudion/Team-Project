@@ -3,43 +3,23 @@
 import { useState, useEffect } from "react";
 import { useParams } from "next/navigation";
 import { authFetch } from "@/lib/authFetch";
+import { useAuth } from "@/context/AuthContext";
 import Link from "next/link";
 import Card from "@/components/common/Card";
 import Button from "@/components/common/Button";
 import StatusBadge from "@/components/common/StatusBadge";
-import { STATUS, STATUS_LABELS } from "@/constants";
+import { STATUS, STATUS_LABELS, DOC_TYPE_LABELS } from "@/constants";
 import { formatDate } from "@/lib/utils";
 import {
-  ArrowLeft,
-  User,
-  GraduationCap,
-  BookOpen,
-  FileText,
-  MessageSquare,
-  CheckCircle,
-  XCircle,
-  Clock,
+  ArrowLeft, User, GraduationCap, BookOpen,
+  FileText, MessageSquare, CheckCircle,
+  XCircle, Clock,
 } from "lucide-react";
 
 const DECISION_OPTIONS = [
-  {
-    value: STATUS.UNDER_REVIEW,
-    label: STATUS_LABELS.under_review,
-    icon: Clock,
-    color: "border-amber-400 text-amber-700 bg-amber-50",
-  },
-  {
-    value: STATUS.OFFERED,
-    label: STATUS_LABELS.offered,
-    icon: CheckCircle,
-    color: "border-green-400 text-green-700 bg-green-50",
-  },
-  {
-    value: STATUS.REJECTED,
-    label: STATUS_LABELS.rejected,
-    icon: XCircle,
-    color: "border-red-400 text-red-700 bg-red-50",
-  },
+  { value: STATUS.UNDER_REVIEW, label: STATUS_LABELS.under_review, icon: Clock,       color: "border-amber-400 text-amber-700 bg-amber-50" },
+  { value: STATUS.OFFERED,      label: STATUS_LABELS.offered,      icon: CheckCircle, color: "border-green-400 text-green-700 bg-green-50" },
+  { value: STATUS.REJECTED,     label: STATUS_LABELS.rejected,     icon: XCircle,     color: "border-red-400   text-red-700   bg-red-50"   },
 ];
 
 function InfoRow({ label, value }) {
@@ -53,46 +33,62 @@ function InfoRow({ label, value }) {
 
 export default function AdminApplicationDetailPage() {
   const { id } = useParams();
+  const { user, loading: authLoading } = useAuth();
 
-  const [application, setApplication] = useState(null);
-  const [loading, setLoading] = useState(true);
-  const [selectedStatus, setSelectedStatus] = useState(STATUS.UNDER_REVIEW);
-  const [notes, setNotes] = useState("");
+  const [application, setApplication]         = useState(null);
+  const [documents, setDocuments]             = useState([]);
+  const [loading, setLoading]                 = useState(true);
+  const [selectedStatus, setSelectedStatus]   = useState(STATUS.UNDER_REVIEW);
+  const [notes, setNotes]                     = useState("");
   const [decisionMessage, setDecisionMessage] = useState("");
-  const [saved, setSaved] = useState(false);
-  const [saving, setSaving] = useState(false);
-  const [error, setError] = useState("");
+  const [saved, setSaved]                     = useState(false);
+  const [saving, setSaving]                   = useState(false);
+  const [error, setError]                     = useState("");
 
   useEffect(() => {
     if (!id) return;
 
+    // Wait for Firebase Auth to finish restoring the session before firing
+    // authFetch — auth.currentUser is null for a brief moment on load, and
+    // authFetch throws immediately if it sees that, which was silently
+    // aborting this fetch (see catch below) and leaving the page stuck on
+    // an empty "loaded" state instead of ever calling the API.
+    if (authLoading) return;
+
+    if (!user) {
+      setError("You need to be signed in to view this application.");
+      setLoading(false);
+      return;
+    }
+
     async function fetchApplication() {
       try {
         const res = await authFetch(`/api/admin/applications/${id}`);
-
         if (res.ok) {
           const data = await res.json();
           const app = data.application;
-
           setApplication(app);
+          setDocuments(data.documents ?? []);
           setSelectedStatus(app.status ?? STATUS.UNDER_REVIEW);
           setNotes(app.adminReview?.internalNotes ?? "");
           setDecisionMessage(app.adminReview?.latestDecisionMessage ?? "");
+        } else {
+          setError(`Failed to load application (${res.status}).`);
         }
       } catch (err) {
         console.error("Failed to load application:", err);
+        setError(err.message || "Failed to load application.");
       } finally {
         setLoading(false);
       }
     }
 
     fetchApplication();
-  }, [id]);
+  }, [id, authLoading, user]);
 
   async function handleSaveDecision() {
     setSaving(true);
     setError("");
-
     try {
       const endpoint =
         selectedStatus === STATUS.UNDER_REVIEW
@@ -100,12 +96,9 @@ export default function AdminApplicationDetailPage() {
           : `/api/admin/applications/${id}/decision`;
 
       const body =
-  selectedStatus === STATUS.UNDER_REVIEW
-    ? { status: selectedStatus }
-    : {
-        decision: selectedStatus,
-        decisionMessage,
-      };
+        selectedStatus === STATUS.UNDER_REVIEW
+          ? { status: selectedStatus }
+          : { decision: selectedStatus, decisionMessage };
 
       const res = await authFetch(endpoint, {
         method: selectedStatus === STATUS.UNDER_REVIEW ? "PATCH" : "POST",
@@ -113,26 +106,22 @@ export default function AdminApplicationDetailPage() {
       });
 
       if (!res.ok) {
-  const data = await res.json().catch(() => null);
-
-  throw new Error(
-    data?.error ||
-      data?.message ||
-      "This decision could not be saved. If the application already has a final decision, further changes require academic representative review."
-  );
-}
+        const data = await res.json().catch(() => null);
+        throw new Error(
+          data?.error || data?.message ||
+          "This decision could not be saved. If the application already has a final decision, further changes require academic representative review."
+        );
+      }
 
       setApplication((current) =>
-        current
-          ? {
-              ...current,
-              status: selectedStatus,
-              adminReview: {
-                ...(current.adminReview ?? {}),
-                latestDecisionMessage: decisionMessage,
-              },
-            }
-          : current
+        current ? {
+          ...current,
+          status: selectedStatus,
+          adminReview: {
+            ...(current.adminReview ?? {}),
+            latestDecisionMessage: decisionMessage,
+          },
+        } : current
       );
 
       setSaved(true);
@@ -147,15 +136,12 @@ export default function AdminApplicationDetailPage() {
   async function handleSaveNotes() {
     setSaving(true);
     setError("");
-
     try {
       const res = await authFetch(`/api/admin/applications/${id}/notes`, {
         method: "POST",
         body: JSON.stringify({ noteText: notes }),
       });
-
       if (!res.ok) throw new Error("Failed to save notes.");
-
       setSaved(true);
       setTimeout(() => setSaved(false), 3000);
     } catch (err) {
@@ -178,42 +164,27 @@ export default function AdminApplicationDetailPage() {
   if (!application) {
     return (
       <div className="max-w-4xl">
-        <Link
-          href="/admin-applications"
-          className="flex items-center gap-2 text-sm text-[#64748b] hover:text-[#1e3a5f] mb-6"
-        >
+        <Link href="/admin-applications" className="flex items-center gap-2 text-sm text-[#64748b] hover:text-[#1e3a5f] mb-6">
           <ArrowLeft size={14} /> Back to Applications
         </Link>
         <Card className="text-center py-16">
-          <p className="text-[#64748b]">Application not found.</p>
+          <p className="text-[#64748b]">{error || "Application not found."}</p>
         </Card>
       </div>
     );
   }
 
-  const {
-    personalInfo,
-    academicInfo,
-    courseInfo,
-    createdAt,
-    updatedAt,
-    universityName,
-  } = application;
+  const { personalInfo, academicInfo, courseInfo, createdAt, updatedAt, universityName } = application;
 
   return (
     <div className="max-w-4xl space-y-5">
-      <Link
-        href="/admin-applications"
-        className="inline-flex items-center gap-2 text-sm text-[#64748b] hover:text-[#1e3a5f] transition-colors"
-      >
+      <Link href="/admin-applications" className="inline-flex items-center gap-2 text-sm text-[#64748b] hover:text-[#1e3a5f] transition-colors">
         <ArrowLeft size={14} /> Back to Applications
       </Link>
 
       <div className="flex items-start justify-between gap-4">
         <div>
-          <h1 className="text-2xl font-bold text-[#1e3a5f]">
-            {application.studentName}
-          </h1>
+          <h1 className="text-2xl font-bold text-[#1e3a5f]">{application.studentName}</h1>
           <p className="text-sm text-[#64748b] mt-0.5">
             Application ID: <span className="font-mono">{id}</span>
             {" · "}Submitted {formatDate(createdAt)}
@@ -229,107 +200,108 @@ export default function AdminApplicationDetailPage() {
       )}
 
       <div className="grid lg:grid-cols-3 gap-5">
+
         {/* Left column */}
         <div className="lg:col-span-2 space-y-5">
+
           <Card>
             <div className="flex items-center gap-2 mb-4">
               <User size={16} className="text-[#1e3a5f]" />
-              <h2 className="font-semibold text-[#1a202c]">
-                Personal Information
-              </h2>
+              <h2 className="font-semibold text-[#1a202c]">Personal Information</h2>
             </div>
             <dl className="grid sm:grid-cols-2 gap-x-6 gap-y-3 text-sm">
-              <InfoRow label="Full name" value={personalInfo?.fullName} />
-              <InfoRow
-                label="Date of birth"
-                value={formatDate(personalInfo?.dateOfBirth)}
-              />
-              <InfoRow label="Nationality" value={personalInfo?.nationality} />
-              <InfoRow
-                label="Passport number"
-                value={personalInfo?.passportNumber}
-              />
+              <InfoRow label="Full name"       value={personalInfo?.fullName} />
+              <InfoRow label="Date of birth"   value={formatDate(personalInfo?.dateOfBirth)} />
+              <InfoRow label="Nationality"     value={personalInfo?.nationality} />
+              <InfoRow label="Passport number" value={personalInfo?.passportNumber} />
             </dl>
           </Card>
 
           <Card>
             <div className="flex items-center gap-2 mb-4">
               <GraduationCap size={16} className="text-[#1e3a5f]" />
-              <h2 className="font-semibold text-[#1a202c]">
-                Academic Information
-              </h2>
+              <h2 className="font-semibold text-[#1a202c]">Academic Information</h2>
             </div>
             <dl className="grid sm:grid-cols-2 gap-x-6 gap-y-3 text-sm">
-              <InfoRow
-                label="Highest qualification"
-                value={academicInfo?.highestQualification}
-              />
-              <InfoRow
-                label="Institution"
-                value={academicInfo?.institutionName ?? academicInfo?.institution}
-              />
-              <InfoRow
-                label="Graduation year"
-                value={academicInfo?.graduationYear}
-              />
-              <InfoRow
-                label="GPA / Grade"
-                value={academicInfo?.gpaOrGrade ?? academicInfo?.gpa}
-              />
+              <InfoRow label="Highest qualification" value={academicInfo?.highestQualification} />
+              <InfoRow label="Institution"           value={academicInfo?.institutionName ?? academicInfo?.institution} />
+              <InfoRow label="Graduation year"       value={academicInfo?.graduationYear} />
+              <InfoRow label="GPA / Grade"           value={academicInfo?.gpaOrGrade ?? academicInfo?.gpa} />
             </dl>
           </Card>
 
           <Card>
             <div className="flex items-center gap-2 mb-4">
               <BookOpen size={16} className="text-[#1e3a5f]" />
-              <h2 className="font-semibold text-[#1a202c]">
-                Course Information
-              </h2>
+              <h2 className="font-semibold text-[#1a202c]">Course Information</h2>
             </div>
             <dl className="grid sm:grid-cols-2 gap-x-6 gap-y-3 text-sm">
-              <InfoRow label="University" value={universityName} />
-              <InfoRow label="Course" value={courseInfo?.courseName} />
-              <InfoRow
-                label="Intended intake"
-                value={courseInfo?.intendedIntake}
-              />
+              <InfoRow label="University"      value={universityName} />
+              <InfoRow label="Course"          value={courseInfo?.courseName} />
+              <InfoRow label="Intended intake" value={courseInfo?.intendedIntake} />
             </dl>
           </Card>
 
           <Card>
             <div className="flex items-center gap-2 mb-4">
               <FileText size={16} className="text-[#1e3a5f]" />
-              <h2 className="font-semibold text-[#1a202c]">
-                Uploaded Documents
-              </h2>
+              <h2 className="font-semibold text-[#1a202c]">Uploaded Documents</h2>
             </div>
-            <p className="text-sm text-[#64748b]">
-              Document upload coming in next sprint.
-            </p>
+            {documents.length === 0 ? (
+              <p className="text-sm text-[#64748b]">No documents uploaded by the student yet.</p>
+            ) : (
+              <ul className="space-y-2">
+                {documents.map((doc) => (
+                  <li key={doc.documentId} className="flex items-center justify-between px-3 py-2.5 rounded-lg border border-[#e2e8f0] bg-[#f8f9fb]">
+                    <div>
+                      <p className="text-sm font-medium text-[#1a202c]">
+                        {DOC_TYPE_LABELS[doc.fileType] ?? doc.fileType}
+                      </p>
+                      <p className="text-xs text-[#64748b]">
+                        {doc.fileName} · Uploaded {formatDate(doc.uploadedAt)}
+                      </p>
+                    </div>
+                    <div className="flex items-center gap-2">
+                      {doc.isDummyFile && (
+                        <span className="text-xs text-[#64748b] bg-[#e2e8f0] px-2 py-0.5 rounded-full">
+                          Demo file
+                        </span>
+                      )}
+                      {doc.fileURL && (
+                        <a
+                          href={doc.fileURL}
+                          target="_blank"
+                          rel="noopener noreferrer"
+                          className="text-xs font-medium text-[#2a5298] hover:underline"
+                        >
+                          {doc.isDummyFile ? "View demo file" : "Download"}
+                        </a>
+                      )}
+                    </div>
+                  </li>
+                ))}
+              </ul>
+            )}
           </Card>
         </div>
 
         {/* Right column */}
         <div className="space-y-5">
+
           <Card>
             <div className="flex items-center gap-2 mb-4">
               <MessageSquare size={16} className="text-[#1e3a5f]" />
               <h2 className="font-semibold text-[#1a202c]">Decision</h2>
             </div>
-
-            <p className="text-xs text-[#64748b] mb-3">
-              Set application status
-            </p>
-
+            <p className="text-xs text-[#64748b] mb-3">Set application status</p>
             <div className="space-y-2 mb-4">
               {DECISION_OPTIONS.map((opt) => (
                 <label
                   key={opt.value}
                   className={`flex items-center gap-3 px-3 py-2.5 rounded-lg border-2 cursor-pointer transition-all
-                    ${
-                      selectedStatus === opt.value
-                        ? opt.color
-                        : "border-[#e2e8f0] text-[#64748b] bg-white hover:border-[#1e3a5f]/30"
+                    ${selectedStatus === opt.value
+                      ? opt.color
+                      : "border-[#e2e8f0] text-[#64748b] bg-white hover:border-[#1e3a5f]/30"
                     }`}
                 >
                   <input
@@ -346,8 +318,7 @@ export default function AdminApplicationDetailPage() {
               ))}
             </div>
 
-            {(selectedStatus === STATUS.OFFERED ||
-              selectedStatus === STATUS.REJECTED) && (
+            {(selectedStatus === STATUS.OFFERED || selectedStatus === STATUS.REJECTED) && (
               <div className="mb-4">
                 <label className="block text-xs font-medium text-[#1a202c] mb-1">
                   Message to student
@@ -376,11 +347,9 @@ export default function AdminApplicationDetailPage() {
               onClick={handleSaveDecision}
               disabled={saving}
               variant={
-                selectedStatus === STATUS.OFFERED
-                  ? "accent"
-                  : selectedStatus === STATUS.REJECTED
-                    ? "danger"
-                    : "primary"
+                selectedStatus === STATUS.OFFERED ? "accent"
+                : selectedStatus === STATUS.REJECTED ? "danger"
+                : "primary"
               }
             >
               {saved ? "✓ Saved" : saving ? "Saving..." : "Save Decision"}
@@ -388,12 +357,8 @@ export default function AdminApplicationDetailPage() {
           </Card>
 
           <Card>
-            <h2 className="font-semibold text-[#1a202c] mb-3">
-              Internal Notes
-            </h2>
-            <p className="text-xs text-[#64748b] mb-2">
-              Visible to admins only.
-            </p>
+            <h2 className="font-semibold text-[#1a202c] mb-3">Internal Notes</h2>
+            <p className="text-xs text-[#64748b] mb-2">Visible to admins only.</p>
             <textarea
               rows={5}
               value={notes}
@@ -419,15 +384,11 @@ export default function AdminApplicationDetailPage() {
             <div className="space-y-3 text-xs text-[#64748b]">
               <div className="flex justify-between">
                 <span>Submitted</span>
-                <span className="font-medium text-[#1a202c]">
-                  {formatDate(createdAt)}
-                </span>
+                <span className="font-medium text-[#1a202c]">{formatDate(createdAt)}</span>
               </div>
               <div className="flex justify-between">
                 <span>Last updated</span>
-                <span className="font-medium text-[#1a202c]">
-                  {formatDate(updatedAt)}
-                </span>
+                <span className="font-medium text-[#1a202c]">{formatDate(updatedAt)}</span>
               </div>
             </div>
           </Card>

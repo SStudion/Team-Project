@@ -1,18 +1,23 @@
 "use client";
-// app/(student)/notifications/page.jsx
 
 import { useState, useEffect } from "react";
+import { useRouter } from "next/navigation";
 import Card from "@/components/common/Card";
+import Button from "@/components/common/Button";
 import { formatDate } from "@/lib/utils";
 import { Bell } from "lucide-react";
 import { db } from "@/lib/firebase/config";
 import { collection, query, where, orderBy, getDocs } from "firebase/firestore";
 import { useAuth } from "@/context/AuthContext";
+import { authFetch } from "@/lib/authFetch";
 
 export default function NotificationsPage() {
   const { user } = useAuth();
+  const router = useRouter();
   const [notifications, setNotifications] = useState([]);
   const [loading, setLoading] = useState(true);
+  const [markingId, setMarkingId] = useState(null);
+  const [markingAll, setMarkingAll] = useState(false);
 
   useEffect(() => {
     async function fetchNotifications() {
@@ -35,13 +40,60 @@ export default function NotificationsPage() {
     fetchNotifications();
   }, [user?.uid]);
 
+  async function markAsRead(notifId, e) {
+    e.stopPropagation();
+    setMarkingId(notifId);
+    try {
+      await authFetch(`/api/notifications/${notifId}/read`, { method: "PATCH" });
+      setNotifications((prev) =>
+        prev.map((n) => n.id === notifId ? { ...n, readStatus: true } : n)
+      );
+    } catch (err) {
+      console.error("Failed to mark as read:", err);
+    } finally {
+      setMarkingId(null);
+    }
+  }
+
+  async function markAllAsRead() {
+    setMarkingAll(true);
+    try {
+      await authFetch("/api/notifications/read-all", { method: "PATCH" });
+      setNotifications((prev) => prev.map((n) => ({ ...n, readStatus: true })));
+    } catch (err) {
+      console.error("Failed to mark all as read:", err);
+    } finally {
+      setMarkingAll(false);
+    }
+  }
+
+  function handleNotifClick(notif) {
+    if (notif.applicationId) {
+      router.push(`/applications/${notif.applicationId}`);
+    }
+  }
+
+  const unreadCount = notifications.filter((n) => !n.readStatus).length;
+
   return (
     <div className="space-y-5 max-w-2xl">
-      <div>
-        <h1 className="text-2xl font-bold text-[#1e3a5f]">Notifications</h1>
-        <p className="text-sm text-[#64748b] mt-0.5">
-          {loading ? "Loading..." : `${notifications.length} notifications total`}
-        </p>
+      <div className="flex items-center justify-between">
+        <div>
+          <h1 className="text-2xl font-bold text-[#1e3a5f]">Notifications</h1>
+          <p className="text-sm text-[#64748b] mt-0.5">
+            {loading ? "Loading..." : `${notifications.length} notifications total`}
+          </p>
+        </div>
+        {unreadCount > 0 && (
+          <Button
+            variant="secondary"
+            size="sm"
+            onClick={markAllAsRead}
+            disabled={markingAll}
+          >
+            {markingAll ? "Marking..." : `Mark all as read (${unreadCount})`}
+          </Button>
+        )}
       </div>
 
       {loading ? (
@@ -58,9 +110,11 @@ export default function NotificationsPage() {
           {notifications.map((notif) => (
             <Card
               key={notif.id}
-              className={`flex items-start gap-4 p-4 ${
-                !notif.readStatus ? "border-l-4 border-l-[#1e3a5f]" : ""
-              }`}
+              onClick={() => handleNotifClick(notif)}
+              className={`flex items-start gap-4 p-4 transition-colors
+                ${!notif.readStatus ? "border-l-4 border-l-[#1e3a5f]" : ""}
+                ${notif.applicationId ? "cursor-pointer hover:bg-[#f8f9fb]" : ""}
+              `}
             >
               <div className="mt-0.5 shrink-0">
                 <div className={`w-2 h-2 rounded-full mt-1 ${
@@ -73,12 +127,19 @@ export default function NotificationsPage() {
                 </p>
                 <p className="text-xs text-[#64748b] mt-1">
                   {formatDate(notif.createdAt)}
+                  {notif.applicationId && (
+                    <span className="ml-2 text-[#2a5298]">View application →</span>
+                  )}
                 </p>
               </div>
               {!notif.readStatus && (
-                <span className="text-xs font-medium text-[#2a5298] shrink-0">
-                  New
-                </span>
+                <button
+                  onClick={(e) => markAsRead(notif.id, e)}
+                  disabled={markingId === notif.id}
+                  className="text-xs font-medium text-[#2a5298] hover:underline shrink-0 disabled:opacity-50"
+                >
+                  {markingId === notif.id ? "..." : "Mark as read"}
+                </button>
               )}
             </Card>
           ))}
