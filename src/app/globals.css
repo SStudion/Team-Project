@@ -1,0 +1,36 @@
+@import "tailwindcss";
+
+@theme inline {
+  /* Brand colours */
+  --color-primary:        #1e3a5f;
+  --color-primary-light:  #2a5298;
+  --color-primary-dark:   #12253d;
+  --color-accent:         #c8973a;
+  --color-accent-light:   #f0c97a;
+
+  /* Status colours — match Firestore status values exactly */
+  --color-status-draft:        #6b7280;
+  --color-status-submitted:    #2563eb;
+  --color-status-under-review: #d97706;
+  --color-status-offered:      #16a34a;
+  --color-status-rejected:     #dc2626;
+
+  /* Neutrals */
+  --color-surface:   #f8f9fb;
+  --color-border:    #e2e8f0;
+  --color-text:      #1a202c;
+  --color-muted:     #64748b;
+
+  --font-sans: "Inter", system-ui, sans-serif;
+}
+
+body {
+  background-color: var(--color-surface);
+  color: var(--color-text);
+  font-family: var(--font-sans);
+  -webkit-font-smoothing: antialiased;
+}
+
+::-webkit-scrollbar { width: 6px; }
+::-webkit-scrollbar-track { background: transparent; }
+::-webkit-scrollbar-thumb { background: var(--color-border); border-radius: 3px; }

@@ -1,0 +1,334 @@
+rules_version = '2';
+
+// Firestore Security Rules — UAAMS
+//
+// These rules ARE the authorisation layer. There's no Express server in front of
+// Firestore, so everything the PRD says about role-based access gets enforced here
+// (and mirrored in the API routes for the server-triggered flows).
+//
+// The model is deny-by-default: if no rule below grants access, Firestore refuses.
+// That's why some collections (emailLogs, systemLogs) have explicit "false" rules —
+// I want it visible that the omission is deliberate, not forgotten.
+
+service cloud.firestore {
+  match /databases/{database}/documents {
+
+    // ── Helpers ─────────────────────────────────────────────
+
+    function signedIn() {
+      return request.auth != null;
+    }
+
+    // I read the caller's own users doc for role checks. This costs one document
+    // read per rule evaluation, which is the accepted trade-off for keeping role
+    // as a plain field instead of a custom claim.
+    function me() {
+      return get(/databases/$(database)/documents/users/$(request.auth.uid)).data;
+    }
+
+    function isStudent() {
+      return signedIn() && me().role == "student";
+    }
+
+    function isAdmin() {
+      return signedIn() && me().role == "university_admin";
+    }
+
+    function myUniversityId() {
+      return me().assignedUniversityId;
+    }
+
+    // True if exactly one canonical doc type went up by 1 and the rest held —
+    // matches what bumpSummary() does on a missing-document upload.
+    function oneDocTypeBumped(before, after) {
+      return after.keys().hasOnly(["passport", "transcript", "certificate", "english_test"]) && (
+        (after.get("passport", 0) == before.get("passport", 0) + 1
+          && after.get("transcript", 0) == before.get("transcript", 0)
+          && after.get("certificate", 0) == before.get("certificate", 0)
+          && after.get("english_test", 0) == before.get("english_test", 0))
+        || (after.get("transcript", 0) == before.get("transcript", 0) + 1
+          && after.get("passport", 0) == before.get("passport", 0)
+          && after.get("certificate", 0) == before.get("certificate", 0)
+          && after.get("english_test", 0) == before.get("english_test", 0))
+        || (after.get("certificate", 0) == before.get("certificate", 0) + 1
+          && after.get("passport", 0) == before.get("passport", 0)
+          && after.get("transcript", 0) == before.get("transcript", 0)
+          && after.get("english_test", 0) == before.get("english_test", 0))
+        || (after.get("english_test", 0) == before.get("english_test", 0) + 1
+          && after.get("passport", 0) == before.get("passport", 0)
+          && after.get("transcript", 0) == before.get("transcript", 0)
+          && after.get("certificate", 0) == before.get("certificate", 0))
+      );
+    }
+
+    // Same shape as oneDocTypeBumped, but for draft-time uploads/deletes where
+    // the legitimate delta is +1 (registerDocument) or -1 (deleteDocument) —
+    // kept as its own function rather than generalising oneDocTypeBumped so
+    // that function's already-reviewed missing_documents behaviour (always
+    // exactly +1) is untouched.
+    function oneDocTypeChangedBy(before, after, delta) {
+      return after.keys().hasOnly(["passport", "transcript", "certificate", "english_test"]) && (
+        (after.get("passport", 0) == before.get("passport", 0) + delta
+          && after.get("transcript", 0) == before.get("transcript", 0)
+          && after.get("certificate", 0) == before.get("certificate", 0)
+          && after.get("english_test", 0) == before.get("english_test", 0))
+        || (after.get("transcript", 0) == before.get("transcript", 0) + delta
+          && after.get("passport", 0) == before.get("passport", 0)
+          && after.get("certificate", 0) == before.get("certificate", 0)
+          && after.get("english_test", 0) == before.get("english_test", 0))
+        || (after.get("certificate", 0) == before.get("certificate", 0) + delta
+          && after.get("passport", 0) == before.get("passport", 0)
+          && after.get("transcript", 0) == before.get("transcript", 0)
+          && after.get("english_test", 0) == before.get("english_test", 0))
+        || (after.get("english_test", 0) == before.get("english_test", 0) + delta
+          && after.get("passport", 0) == before.get("passport", 0)
+          && after.get("transcript", 0) == before.get("transcript", 0)
+          && after.get("certificate", 0) == before.get("certificate", 0))
+      );
+    }
+
+    // True if documentSummary changed by exactly the shape bumpSummary() writes
+    // during draft editing: total moves by +1 (upload) or -1 (delete), and
+    // exactly one canonical byType counter moves by that same delta.
+    function draftDocumentSummaryChangeValid(before, after) {
+      return (
+        (after.total == before.total + 1 && oneDocTypeChangedBy(before.byType, after.byType, 1))
+        || (after.total == before.total - 1 && oneDocTypeChangedBy(before.byType, after.byType, -1))
+      );
+    }
+
+    // ── users ───────────────────────────────────────────────
+    // Everyone may read and maintain their own profile — nobody else's.
+    // Admins don't get to browse student profiles here; everything the review
+    // screen needs is denormalised onto the application document instead.
+
+    match /users/{userId} {
+      allow read: if signedIn() && request.auth.uid == userId;
+
+      // Self-registration can only ever create a *student* account, with consent
+      // captured. Admin accounts are seeded server-side per the PRD — there is no
+      // path from this rule to an admin role, which is the point.
+      allow create: if signedIn()
+        && request.auth.uid == userId
+        && request.resource.data.role == "student"
+        && request.resource.data.privacyPolicyAccepted == true;
+
+      // Own profile edits, but role and university assignment are frozen —
+      // letting a user flip their own role would undo every other rule in here.
+      allow update: if signedIn()
+        && request.auth.uid == userId
+        && request.resource.data.role == resource.data.role
+        && request.resource.data.assignedUniversityId == resource.data.assignedUniversityId;
+
+      // GDPR deletion is a server-side flow (it has to clean up Storage and other
+      // collections too), so no client delete.
+      allow delete: if false;
+    }
+
+    // ── universities ────────────────────────────────────────
+    // The catalogue. Any signed-in user can read it (students need it for the
+    // application form); it's only ever written by server-side seeding.
+
+    match /universities/{universityId} {
+      allow read: if signedIn();
+      allow write: if false;
+    }
+
+    // ── applications ────────────────────────────────────────
+
+    match /applications/{applicationId} {
+
+      // Students see their own; admins see their own university's. Nothing else.
+      allow read: if (isStudent() && resource.data.studentId == request.auth.uid)
+        || (isAdmin() && resource.data.universityId == myUniversityId());
+
+      // A student creates their own application and it must start as a draft —
+      // admins shouldn't see anything before the student actually submits.
+      // The adminReview/submittedAt/decidedAt pins stop a crafted create from
+      // seeding fake review state (a fake decision message, a fake decided
+      // date) into a document that later becomes real once submitted — these
+      // must match createDraftApplication()'s actual initial shape exactly.
+      // adminReview is checked field-by-field rather than one map-literal
+      // equality — comparing a map containing null values via == triggers an
+      // internal "Null value error" in the rules evaluator instead of a clean
+      // boolean, discovered while testing this rule. Field-by-field avoids it
+      // while enforcing the exact same shape.
+      allow create: if isStudent()
+        && request.resource.data.studentId == request.auth.uid
+        && request.resource.data.status == "draft"
+        && request.resource.data.adminReview.keys()
+             .hasOnly(["reviewedBy", "reviewedAt", "latestDecisionMessage", "internalNotesCount"])
+        && request.resource.data.adminReview.reviewedBy == null
+        && request.resource.data.adminReview.reviewedAt == null
+        && request.resource.data.adminReview.latestDecisionMessage == ""
+        && request.resource.data.adminReview.internalNotesCount == 0
+        && request.resource.data.submittedAt == null
+        && request.resource.data.decidedAt == null;
+
+      // Several very different update paths:
+      //
+      // 1a) Student, draft form editing (updateDraftApplication): status never
+      //     leaves "draft" here — draft -> submitted is exclusively a server
+      //     (Admin SDK) transition now, via /api/applications/[id]/submit, so
+      //     it can own the confirmation email/notification and can't be
+      //     raced or spoofed from the client. Only the form-section fields
+      //     may change; adminReview/decidedAt/submittedAt are unreachable
+      //     because they're not in the allowlist, regardless of their value.
+      // 1b) Student, draft documentSummary bump (bumpSummary(), called from
+      //     both registerDocument() and deleteDocument() while still draft):
+      //     kept as its own branch, separate from 1a, since it's a distinct
+      //     legitimate write shape with nothing to do with the form fields.
+      // (No client branch for admin decisions: status/adminReview/decidedAt
+      //  changes are exclusively an Admin SDK transition via decisionService.js,
+      //  which bypasses these rules entirely — a client-writable path here would
+      //  let an admin change status without the decisionHistory record,
+      //  notification or email that path guarantees. Admin reads are untouched;
+      //  only this update permission is removed.)
+      allow update: if (
+          isStudent()
+          && resource.data.studentId == request.auth.uid
+          && resource.data.status == "draft"
+          && request.resource.data.status == "draft"
+          && request.resource.data.studentId == resource.data.studentId
+          && request.resource.data.universityId == resource.data.universityId
+          && request.resource.data.diff(resource.data).affectedKeys()
+               .hasOnly(["personalInfo", "academicInfo", "courseInfo", "updatedAt"])
+          && request.resource.data.updatedAt == request.time
+        ) || (
+          isStudent()
+          && resource.data.studentId == request.auth.uid
+          && resource.data.status == "draft"
+          && request.resource.data.status == "draft"
+          && request.resource.data.studentId == resource.data.studentId
+          && request.resource.data.universityId == resource.data.universityId
+          && request.resource.data.diff(resource.data).affectedKeys().hasOnly(["documentSummary", "updatedAt"])
+          && request.resource.data.updatedAt == request.time
+          && draftDocumentSummaryChangeValid(resource.data.documentSummary, request.resource.data.documentSummary)
+        ) || (
+          // 2) Student, missing_documents: only the documentSummary rollup
+          //    bumpSummary() writes after a requested document is uploaded.
+          //    status/identity stay frozen, so this can't reopen the
+          //    application or touch adminReview.
+          isStudent()
+          && resource.data.studentId == request.auth.uid
+          && resource.data.status == "missing_documents"
+          && request.resource.data.status == "missing_documents"
+          && request.resource.data.studentId == resource.data.studentId
+          && request.resource.data.universityId == resource.data.universityId
+          && request.resource.data.diff(resource.data).affectedKeys().hasOnly(["documentSummary", "updatedAt"])
+          && request.resource.data.updatedAt == request.time
+          && request.resource.data.documentSummary.total == resource.data.documentSummary.total + 1
+          && oneDocTypeBumped(resource.data.documentSummary.byType, request.resource.data.documentSummary.byType)
+        );
+
+      // Only unsubmitted drafts can be deleted, and only by their owner.
+      allow delete: if isStudent()
+        && resource.data.studentId == request.auth.uid
+        && resource.data.status == "draft";
+    }
+
+    // ── documents ───────────────────────────────────────────
+    // Metadata only — the files themselves are covered by storage.rules.
+
+    match /documents/{documentId} {
+
+      allow read: if (isStudent() && resource.data.studentId == request.auth.uid)
+        || (isAdmin() && resource.data.universityId == myUniversityId());
+
+      // The get() here verifies the student actually owns the application they're
+      // attaching a document to, and that it's either in draft or missing_documents.
+      // Costs a read, but without it anyone could attach files to someone else's application.
+      // During missing_documents, creation is restricted to the requested document types.
+      allow create: if isStudent()
+        && request.resource.data.studentId == request.auth.uid
+        && request.resource.data.uploadedBy == request.auth.uid
+        && get(/databases/$(database)/documents/applications/$(request.resource.data.applicationId)).data.studentId == request.auth.uid
+        && request.resource.data.universityId ==
+      get(/databases/$(database)/documents/applications/$(request.resource.data.applicationId)).data.universityId
+       && (
+      (get(/databases/$(database)/documents/applications/$(request.resource.data.applicationId)).data.status == "draft"
+        && request.resource.data.fileType in ["passport", "transcript", "certificate", "english_test"])
+    || (
+      get(/databases/$(database)/documents/applications/$(request.resource.data.applicationId)).data.status == "missing_documents"
+      && ("adminReview" in get(/databases/$(database)/documents/applications/$(request.resource.data.applicationId)).data)
+      && ("missingDocumentTypes" in get(/databases/$(database)/documents/applications/$(request.resource.data.applicationId)).data.adminReview)
+      && request.resource.data.fileType in get(/databases/$(database)/documents/applications/$(request.resource.data.applicationId)).data.adminReview.missingDocumentTypes
+    )
+  );
+
+      // Replacing a document = delete + upload again. No in-place edits, so the
+      // metadata can never drift away from the file it describes.
+      allow update: if false;
+
+      allow delete: if isStudent()
+        && resource.data.studentId == request.auth.uid
+        && get(/databases/$(database)/documents/applications/$(resource.data.applicationId)).data.status == "draft";
+    }
+
+    // ── internalNotes ───────────────────────────────────────
+    // Admin-only by design. Note there is no student branch in ANY rule here —
+    // students are denied by default, not by exception. This is exactly why notes
+    // live in their own top-level collection instead of on the application document
+    // a student is allowed to read (reasoning spelled out in docs/data-contract.md).
+
+    match /internalNotes/{noteId} {
+      allow read: if isAdmin() && resource.data.universityId == myUniversityId();
+
+      allow create: if isAdmin()
+        && request.resource.data.universityId == myUniversityId()
+        && request.resource.data.createdBy == request.auth.uid;
+
+      // Admins can edit/remove their own university's notes (e.g. fixing a typo,
+      // removing an outdated remark).
+      allow update, delete: if isAdmin()
+        && resource.data.universityId == myUniversityId();
+    }
+
+    // ── decisionHistory ─────────────────────────────────────
+    // Append-only audit trail. Admins can READ their university's history (the
+    // review screen shows a timeline), but no client can write — records are
+    // created exclusively by the server-side decision service via the Admin SDK,
+    // which bypasses these rules. An audit trail the browser could edit wouldn't
+    // prove anything.
+
+    match /decisionHistory/{decisionId} {
+      allow read: if isAdmin() && resource.data.universityId == myUniversityId();
+      allow write: if false;
+    }
+
+    // ── notifications ───────────────────────────────────────
+
+    match /notifications/{notificationId} {
+      allow read: if signedIn() && resource.data.userId == request.auth.uid;
+
+      // The one thing a user may change: marking their own notification read.
+      // affectedKeys pins it to exactly those two fields so notification content
+      // can't be rewritten client-side after the event.
+      allow update: if signedIn()
+        && resource.data.userId == request.auth.uid
+        && request.resource.data.diff(resource.data).affectedKeys()
+             .hasOnly(["readStatus", "readAt"]);
+
+      // Created by server code alongside decisions/submissions; never deleted
+      // from the client.
+      allow create, delete: if false;
+    }
+
+    // ── emailLogs ───────────────────────────────────────────
+    // Server-write-only, and server-READ-only too — logs are operational evidence,
+    // not user-facing data. The admin "email logs" view goes through an API route
+    // using the Admin SDK, which is also where role checks for it happen.
+
+    match /emailLogs/{emailLogId} {
+      allow read, write: if false;
+    }
+
+    // ── systemLogs ──────────────────────────────────────────
+    // Audit logger output (auth failures, permission violations, email errors).
+    // No client access in either direction, same reasoning as emailLogs.
+
+    match /systemLogs/{logId} {
+      allow read, write: if false;
+    }
+  }
+}
