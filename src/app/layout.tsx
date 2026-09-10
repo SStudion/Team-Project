@@ -7,7 +7,7 @@ import "./globals.css";
 import { AuthProvider } from "@/context/AuthContext";
 
 export const metadata: Metadata = {
-  title: "UAAMS — University Application Management",
+  title: "UAAMS - University Application Management",
   description: "Manage your university applications in one place.",
 };
 

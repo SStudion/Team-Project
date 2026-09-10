@@ -24,7 +24,7 @@ export default function AuthLayout({ children }) {
       </div>
 
       <p className="text-white/40 text-xs mt-6">
-        © 2025 UAAMS. All rights reserved.
+        © {new Date().getFullYear()} UAAMS. All rights reserved.
       </p>
     </div>
   );

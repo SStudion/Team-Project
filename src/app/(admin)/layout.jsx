@@ -56,7 +56,7 @@ export default function AdminLayout({ children }) {
       <div className="flex-1 flex flex-col min-w-0">
         <header className="h-14 bg-white border-b border-[#e2e8f0] flex items-center px-4 sm:px-6 shrink-0">
           <p className="text-sm text-[#64748b] truncate">
-            Admin Portal —{" "}
+            Admin Portal :{" "}
             <span className="font-medium text-[#1a202c]">Southampton Solent University</span>
           </p>
         </header>
