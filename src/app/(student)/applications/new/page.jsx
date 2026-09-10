@@ -9,6 +9,7 @@ import { createDraftApplication, updateDraftApplication, getApplication } from "
 import { registerDocument } from "@/lib/firebase/documents";
 import { listUniversities } from "@/lib/firebase/universities";
 import { authFetch } from "@/lib/authFetch";
+import { isValidDob } from "@/lib/validation/applicationValidation";
 import { CheckCircle } from "lucide-react";
 
 const STEPS = ["Personal Info", "Academic Info", "Course", "Documents"];
@@ -148,6 +149,11 @@ function NewApplicationPageInner() {
       !form.passportNumber.trim()
     )) {
       setError("Please fill in all personal information fields before continuing.");
+      return;
+    }
+
+    if (step === 0 && !isValidDob(form.dateOfBirth)) {
+      setError("Please enter a valid date of birth (a real date, not in the future).");
       return;
     }
 

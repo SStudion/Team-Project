@@ -23,6 +23,27 @@ function isEmpty(value) {
   return value === undefined || value === null || String(value).trim() === "";
 }
 
+const DOB_PATTERN = /^\d{4}-\d{2}-\d{2}$/;
+
+/**
+ * True when `value` is a well-formed "YYYY-MM-DD" date (exactly a 4-digit
+ * year — rejects overflowed native <input type="date"> values like
+ * "72006-03-11"), corresponds to a real calendar date, and isn't in the future.
+ */
+export function isValidDob(value) {
+  if (typeof value !== "string" || !DOB_PATTERN.test(value)) return false;
+
+  const [year, month, day] = value.split("-").map(Number);
+  const date = new Date(Date.UTC(year, month - 1, day));
+  const isRealCalendarDate =
+    date.getUTCFullYear() === year &&
+    date.getUTCMonth() === month - 1 &&
+    date.getUTCDate() === day;
+  if (!isRealCalendarDate) return false;
+
+  return date.getTime() <= Date.now();
+}
+
 /** Validates an application for submission per PRD 4.2.3 — returns { valid, errors } with one message per missing field. */
 export function validateApplicationForSubmit(application) {
   const errors = {};
@@ -32,6 +53,13 @@ export function validateApplicationForSubmit(application) {
     if (isEmpty(value)) {
       errors[`${section}.${field}`] = `${label} is required.`;
     }
+  }
+
+  // Date of birth gets a sanity check on top of presence — the native
+  // <input type="date"> lets an overflowed year like "72006-03-11" through
+  // on some browsers, and that shouldn't pass silently.
+  if (!errors["personalInfo.dateOfBirth"] && !isValidDob(application?.personalInfo?.dateOfBirth)) {
+    errors["personalInfo.dateOfBirth"] = "Enter a valid date of birth (not in the future).";
   }
 
   // Graduation year gets a sanity check on top of presence — "20222" passing
